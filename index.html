@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Transformers.js Translator</title>
+<style>
+  :root { --bg:#0f1419; --card:#1a212b; --line:#2a3441; --text:#e6edf3; --muted:#8b98a8; --accent:#4f8cff; --ok:#3fb950; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin:0; min-height:100vh; min-height:100dvh; background:var(--bg); color:var(--text);
+         font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+         display:flex; justify-content:center; overflow-x:hidden;
+         padding:24px max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left)); }
+  .app { width:100%; max-width:900px; min-width:0; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:14px; margin-bottom:16px; }
+
+  /* 16px+ text and 44px targets: no iOS zoom-on-focus, easy to tap */
+  select, button { background:var(--card); color:var(--text); border:1px solid var(--line);
+                   border-radius:10px; padding:0 12px; min-height:44px; font:inherit; font-size:16px; cursor:pointer;
+                   touch-action:manipulation; }
+  select { width:100%; min-width:0; text-overflow:ellipsis; }
+  button:hover:not(:disabled), select:hover { border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+
+  .bar { display:grid; grid-template-columns:1fr 44px 1fr; gap:8px; align-items:center; margin-bottom:12px; }
+  #swap { width:44px; padding:0; }
+
+  .panels { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px;
+           display:flex; flex-direction:column; min-width:0; min-height:240px; }
+  textarea, .out { flex:1; background:transparent; border:0; outline:0; color:var(--text);
+                   font:inherit; font-size:18px; resize:none; width:100%; min-height:170px;
+                   overflow-wrap:anywhere; }
+  .out { white-space:pre-wrap; overflow:auto; -webkit-overflow-scrolling:touch; }
+  .out.empty { color:var(--muted); }
+  .foot { display:flex; justify-content:space-between; align-items:center; gap:8px;
+          color:var(--muted); font-size:13px; margin-top:8px; flex-wrap:wrap; }
+  .foot button { min-height:38px; padding:0 12px; font-size:14px; }
+  .badge { color:var(--ok); min-width:0; overflow-wrap:anywhere; }
+
+  .progress { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:12px; display:none; }
+  .progress > div { height:100%; width:0; background:var(--accent); transition:width .15s; }
+
+  /* action row sticks to the bottom so Translate is always reachable with the keyboard/scroll */
+  .row { position:sticky; bottom:0; margin:12px -16px 0; padding:10px 16px calc(10px + env(safe-area-inset-bottom));
+         display:flex; gap:12px; align-items:center; background:var(--bg); border-top:1px solid var(--line); }
+  .row .primary { flex:0 0 auto; min-width:140px; }
+  .status { flex:1; min-width:0; color:var(--muted); font-size:13px; line-height:1.35; overflow-wrap:anywhere; }
+  .err { color:#ff7b72; }
+
+  @media (max-width:700px) {
+    body { padding-top:16px; }
+    h1 { font-size:20px; }
+    .panels { grid-template-columns:1fr; gap:10px; }
+    .panel { min-height:150px; }
+    textarea, .out { min-height:130px; }
+    .row .primary { flex:1 1 40%; }
+    .status { flex:1 1 60%; }
+  }
+  @media (max-width:360px) { .row { flex-wrap:wrap; } .row .primary, .status { flex-basis:100%; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Transformers.js Translator</h1>
+  <div class="sub" id="sub">Runs entirely in your browser · no server, no API key, no usage limits</div>
+
+  <div class="bar">
+    <select id="src"></select>
+    <button id="swap" title="Swap languages">⇄</button>
+    <select id="tgt"></select>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <textarea id="inp" placeholder="Type or paste text… (Ctrl+Enter to translate)" maxlength="5000"></textarea>
+      <div class="foot"><span id="count">0 / 5000</span><button id="clear">Clear</button></div>
+    </div>
+    <div class="panel">
+      <div id="out" class="out empty">Translation appears here</div>
+      <div class="foot"><span id="engine" class="badge"></span>
+        <span><button id="speak">🔊 Listen</button> <button id="copy">Copy</button></span></div>
+    </div>
+  </div>
+
+  <div class="progress" id="prog"><div id="bar"></div></div>
+  <div class="row">
+    <button id="go" class="primary">Translate</button>
+    <span id="status" class="status">First translation downloads a model once (Wi-Fi recommended), then it's cached.</span>
+  </div>
+</div>
+
+<script type="module">
+/* ===================== CONFIG ===================== */
+// false = load library + models from CDNs (works immediately, needs internet on first use)
+// true  = load everything from your own ./lib and ./models folders (run setup_selfhost.py first)
+const SELF_HOST = false;
+const CDN_LIB   = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
+const LANGS = { en:"English", fr:"French", hi:"Hindi", es:"Spanish", de:"German", it:"Italian",
+                pt:"Portuguese", ja:"Japanese", zh:"Chinese", ar:"Arabic", ru:"Russian", ko:"Korean" };
+/* ================================================== */
+
+const $ = id => document.getElementById(id);
+const src = $("src"), tgt = $("tgt"), inp = $("inp"), out = $("out");
+src.innerHTML = tgt.innerHTML = Object.entries(LANGS).map(([c, n]) => `<option value="${c}">${n}</option>`).join("");
+src.value = "en"; tgt.value = "fr";
+if (SELF_HOST) $("sub").textContent = "Fully self-hosted · runs entirely in your browser · no external services";
+
+const setStatus = (m, err = false) => { $("status").className = "status" + (err ? " err" : ""); $("status").textContent = m; };
+const setProgress = p => { $("prog").style.display = p == null ? "none" : "block"; if (p != null) $("bar").style.width = Math.round(p * 100) + "%"; };
+const setOut = t => { out.textContent = t || "Translation appears here"; out.classList.toggle("empty", !t); if (!t) $("engine").textContent = ""; };
+
+function chunk(text, max = 400) {
+  const parts = [];
+  for (const line of text.split("\n")) {
+    if (line.length <= max) { parts.push(line); continue; }
+    let cur = "";
+    for (const s of line.split(/(?<=[.!?।。])\s+/)) {
+      if ((cur + " " + s).length > max) { if (cur) parts.push(cur); cur = ""; }
+      let piece = s;
+      while (piece.length > max) { parts.push(piece.slice(0, max)); piece = piece.slice(max); }
+      cur = cur ? cur + " " + piece : piece;
+    }
+    if (cur) parts.push(cur);
+  }
+  return parts;
+}
+
+// ---------- Transformers.js ----------
+let tfPromise = null;
+function loadTF() {
+  if (!tfPromise) {
+    tfPromise = import(SELF_HOST ? "./lib/transformers.min.js" : CDN_LIB).then(m => {
+      if (SELF_HOST) {
+        m.env.allowRemoteModels = false;          // never contact Hugging Face
+        m.env.allowLocalModels = true;
+        m.env.localModelPath = "./models/";
+        m.env.backends.onnx.wasm.wasmPaths = "./lib/"; // ONNX runtime files served locally
+      } else {
+        m.env.allowLocalModels = false;
+      }
+      return m;
+    });
+  }
+  return tfPromise;
+}
+
+const pipes = {};
+async function getPipe(from, to) {
+  const key = `${from}-${to}`;
+  if (pipes[key]) return pipes[key];
+  setStatus(`Loading ${LANGS[from]}→${LANGS[to]} model…`);
+  const tf = await loadTF();
+  const files = {};
+  pipes[key] = tf.pipeline("translation", `Xenova/opus-mt-${key}`, {
+    dtype: "q8",
+    progress_callback: e => {
+      if (e.status === "progress" && e.total) {
+        files[e.file] = { l: e.loaded, t: e.total };
+        const l = Object.values(files).reduce((a, f) => a + f.l, 0);
+        const t = Object.values(files).reduce((a, f) => a + f.t, 0);
+        setProgress(l / t);
+      }
+    }
+  }).catch(err => {
+    delete pipes[key];
+    throw new Error(`Couldn't load model for ${LANGS[from]}→${LANGS[to]}. ` +
+      (SELF_HOST ? `Is it in ./models/Xenova/opus-mt-${key}? (run: python setup_selfhost.py ${key})` : `That pair may not exist.`));
+  });
+  const p = await pipes[key];
+  setProgress(null);
+  return p;
+}
+
+async function translatePair(text, from, to) {
+  const pipe = await getPipe(from, to);
+  setStatus("Translating…");
+  const res = [];
+  for (const piece of chunk(text)) {
+    res.push(piece.trim() ? (await pipe(piece, { max_new_tokens: 512 }))[0].translation_text : piece);
+  }
+  return res.join("\n");
+}
+// opus-mt models are mostly English<->X, so other pairs pivot through English
+async function translate(text, from, to) {
+  if (from === "en" || to === "en") return translatePair(text, from, to);
+  return translatePair(await translatePair(text, from, "en"), "en", to);
+}
+
+// ---------- main ----------
+let seq = 0;
+async function doTranslate() {
+  const text = inp.value;
+  if (!text.trim()) { setOut(""); return; }
+  const id = ++seq, from = src.value, to = tgt.value;
+  $("go").disabled = true; setProgress(null);
+  try {
+    if (from === to) { setOut(text); $("engine").textContent = "Same language"; setStatus(""); return; }
+    const result = await translate(text, from, to);
+    if (id !== seq) return;
+    setOut(result);
+    if (matchMedia("(max-width: 700px)").matches) out.scrollIntoView({ behavior: "smooth", block: "center" });
+    $("engine").textContent = "✓ On-device (Transformers.js)" + (from !== "en" && to !== "en" ? " · via English" : "");
+    setStatus("");
+  } catch (e) {
+    if (id !== seq) return;
+    console.error(e); setStatus(e.message || "Translation failed", true);
+  } finally { setProgress(null); if (id === seq) $("go").disabled = false; }
+}
+
+// ---------- events ----------
+$("go").onclick = doTranslate;
+inp.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") doTranslate(); });
+if (matchMedia("(pointer: coarse)").matches) inp.placeholder = "Type or paste text…";
+inp.addEventListener("input", () => { $("count").textContent = inp.value.length + " / 5000"; });
+$("swap").onclick = () => {
+  [src.value, tgt.value] = [tgt.value, src.value];
+  if (!out.classList.contains("empty")) { inp.value = out.textContent; $("count").textContent = inp.value.length + " / 5000"; }
+  doTranslate();
+};
+$("clear").onclick = () => { inp.value = ""; $("count").textContent = "0 / 5000"; setOut(""); setStatus(""); inp.focus(); };
+$("copy").onclick = async () => {
+  if (out.classList.contains("empty")) return;
+  const text = out.textContent;
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {                                   // older / non-secure contexts
+    const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+  }
+  $("copy").textContent = "Copied ✓"; setTimeout(() => $("copy").textContent = "Copy", 1200);
+};
+$("speak").onclick = () => {
+  if (out.classList.contains("empty")) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(out.textContent); u.lang = tgt.value; speechSynthesis.speak(u);
+};
+</script>
+</body>
+</html>
